@@ -4,6 +4,7 @@ import tls from 'tls';
 import dns from 'dns';
 import { Resolver } from 'dns/promises';
 import { gotScraping } from 'got-scraping';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 
 const PORT = process.env.PORT || 3000;
 
@@ -131,9 +132,19 @@ async function fetchThrough(targetUrl, proxyUrl, timeout=25000) {
   };
 
   if (proxyUrl) {
-    opts.proxyUrl = proxyUrl;
-    console.log(`  🔗 Proxy: ${proxyUrl}`);
-    if (proxyUrl.toLowerCase().startsWith('socks')) console.log('  🇷🇺 SOCKS remote DNS active');
+    const lower = proxyUrl.toLowerCase();
+    if (lower.startsWith('socks')) {
+      // SOCKS proxies need SocksProxyAgent — got-scraping v4 doesn't support socks:// natively
+      const agent = new SocksProxyAgent(proxyUrl);
+      opts.agent = { http: agent, https: agent };
+      // Disable http2 when using SOCKS agent (not compatible)
+      opts.http2 = false;
+      console.log(`  🔗 SOCKS Proxy: ${proxyUrl} (via SocksProxyAgent)`);
+      console.log('  🇷🇺 SOCKS remote DNS active');
+    } else {
+      opts.proxyUrl = proxyUrl;
+      console.log(`  🔗 HTTP Proxy: ${proxyUrl}`);
+    }
   } else if (resolvedIp) {
     // Direct fetch with Russian DNS resolved IP
     opts.url = targetUrl.replace(parsed.hostname, resolvedIp);
@@ -161,7 +172,14 @@ const server = http.createServer(async (req, res) => {
     const pa=`${proto}://${host}:${port}`;console.log(`🔍 Test: ${pa}`);const t0=Date.now();
     for(const target of ['http://httpbin.org/ip','http://ip-api.com/json','http://ifconfig.me/ip']){
       try{console.log(`  → ${target} via ${pa}`);
-        const r=await gotScraping({url:target,proxyUrl:pa,timeout:{request:12000},retry:{limit:0},http2:false,followRedirect:true,responseType:'text',https:{rejectUnauthorized:false}});
+        const testOpts = {url:target,timeout:{request:12000},retry:{limit:0},http2:false,followRedirect:true,responseType:'text',https:{rejectUnauthorized:false}};
+        if (proto.startsWith('socks')) {
+          const agent = new SocksProxyAgent(pa);
+          testOpts.agent = { http: agent, https: agent };
+        } else {
+          testOpts.proxyUrl = pa;
+        }
+        const r=await gotScraping(testOpts);
         let ip='';try{const b=r.body;if(b.includes('"origin"'))ip=JSON.parse(b).origin;else if(b.includes('"query"'))ip=JSON.parse(b).query;else ip=b.trim().split('\n')[0].substring(0,45)}catch{}
         console.log(`  ✓ ALIVE ${Date.now()-t0}ms exit:${ip||'?'}`);
         return json(res,{host,port:+port,proto,status:'alive',latency:Date.now()-t0,detail:`HTTP ${r.statusCode}`,exitIp:ip||null});
